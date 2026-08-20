@@ -1,0 +1,94 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap');
+
+/* Beauty Inventory — scoped token overrides */
+.beauty-inventory-root {
+  --background: 24 44% 96%;
+  --foreground: 334 32% 20%;
+  --border: 19 27% 87%;
+  --input: 19 27% 83%;
+  --ring: 346 53% 49%;
+  --card: 30 47% 99%;
+  --card-foreground: 334 32% 20%;
+  --card-border: 19 30% 88%;
+  --popover: 30 47% 99%;
+  --popover-foreground: 334 32% 20%;
+  --primary: 346 53% 49%;
+  --primary-foreground: 30 47% 99%;
+  --secondary: 17 38% 91%;
+  --secondary-foreground: 337 32% 30%;
+  --muted: 24 30% 92%;
+  --muted-foreground: 332 13% 48%;
+  --accent: 22 59% 65%;
+  --accent-foreground: 334 32% 20%;
+  --destructive: 2 58% 47%;
+  --destructive-foreground: 30 47% 99%;
+  --app-font-sans: 'Noto Sans TC', ui-sans-serif, sans-serif;
+  --app-font-serif: 'Playfair Display', 'Noto Sans TC', serif;
+  --app-font-mono: ui-monospace, monospace;
+  --radius: 1.15rem;
+
+  font-family: var(--app-font-sans);
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  min-width: 320px;
+}
+
+/* font-display utility scoped to the beauty inventory root */
+.beauty-inventory-root .font-display {
+  font-family: var(--app-font-serif) !important;
+}
+
+/* shelf-shell background */
+.beauty-inventory-root .shelf-shell {
+  background:
+    radial-gradient(circle at 88% 0%, hsl(346 53% 49% / .09), transparent 32rem),
+    radial-gradient(circle at 7% 54%, hsl(22 59% 65% / .09), transparent 26rem),
+    hsl(var(--background));
+}
+
+/* paper-grain texture overlay */
+.beauty-inventory-root .paper-grain::after {
+  content: '';
+  pointer-events: none;
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  opacity: .034;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+}
+
+/* shadows */
+.beauty-inventory-root .soft-shadow {
+  box-shadow: 0 18px 48px hsl(334 32% 20% / .08), 0 2px 6px hsl(334 32% 20% / .04);
+}
+.beauty-inventory-root .card-shadow {
+  box-shadow: 0 12px 30px hsl(334 32% 20% / .07), 0 2px 4px hsl(334 32% 20% / .035);
+}
+
+/* animations */
+.beauty-inventory-root .rise-in {
+  animation: beauty-rise-in .6s cubic-bezier(.22, .8, .24, 1) both;
+}
+.beauty-inventory-root .rise-in-delay-1 { animation-delay: .08s; }
+.beauty-inventory-root .rise-in-delay-2 { animation-delay: .16s; }
+.beauty-inventory-root .rise-in-delay-3 { animation-delay: .24s; }
+.beauty-inventory-root .rise-in-delay-4 { animation-delay: .32s; }
+
+@keyframes beauty-rise-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* dialog animation */
+.beauty-inventory-root .rise-in[role="dialog"] {
+  animation: beauty-rise-in .6s cubic-bezier(.22, .8, .24, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .beauty-inventory-root *,
+  .beauty-inventory-root *::before,
+  .beauty-inventory-root *::after {
+    animation-duration: .01ms !important;
+    transition-duration: .01ms !important;
+  }
+}
