@@ -1,0 +1,29 @@
+kind = "video"
+previewPath = "/"
+title = "Beauty Drawer — Product Introduction"
+description = "A 16:9 animated product introduction for the Beauty Drawer cosmetics inventory app."
+version = "1.0.0"
+id = "artifacts/beauty-drawer-video"
+videoAspectRatio = "16:9"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18378
+
+[services.development]
+run = "pnpm --filter @workspace/beauty-drawer-video run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/beauty-drawer-video", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/beauty-drawer-video/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18378"
+BASE_PATH = "/"
