@@ -5,9 +5,6 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-export interface HealthStatus {
-  status: string;
-}
 
 export interface ProductRecognitionInput {
   /**
@@ -19,11 +16,3 @@ export interface ProductRecognitionInput {
   /** @maxLength 4000 */
   ocrText?: string;
 }
-
-export interface ProductRecognition {
-  /** @minLength 1 */
-  name: string;
-  /** @minLength 1 */
-  brand: string;
-}
-

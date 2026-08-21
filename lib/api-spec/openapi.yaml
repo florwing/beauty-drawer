@@ -24,6 +24,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /ai/product-recognition:
+    post:
+      operationId: recognizeProductPhoto
+      tags: [ai]
+      summary: Recognize a beauty product from a photo
+      description: Uses DeepSeek Vision to suggest a Traditional Chinese product name and brand.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductRecognitionInput"
+      responses:
+        "200":
+          description: Product details recognized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductRecognition"
+        "400":
+          description: Invalid image input
+        "502":
+          description: Recognition provider failed
 components:
   schemas:
     HealthStatus:
@@ -33,4 +56,29 @@ components:
           type: string
       required:
         - status
+    ProductRecognitionInput:
+      type: object
+      required:
+        - imageData
+      properties:
+        imageData:
+          type: string
+          description: Base64 data URL for a JPEG, PNG, GIF, or WebP product photo.
+          minLength: 32
+          maxLength: 6500000
+        ocrText:
+          type: string
+          maxLength: 4000
+    ProductRecognition:
+      type: object
+      required:
+        - name
+        - brand
+      properties:
+        name:
+          type: string
+          minLength: 1
+        brand:
+          type: string
+          minLength: 1
 
