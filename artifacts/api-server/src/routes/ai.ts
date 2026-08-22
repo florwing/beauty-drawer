@@ -119,6 +119,7 @@ router.post(
         },
         body: JSON.stringify({
           model: "deepseek-v4-flash-vision-exp",
+          thinking: { type: "disabled" },
           messages: [
             {
               role: "user",
