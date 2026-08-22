@@ -42,18 +42,8 @@ type Product = {
 
 type ExpiryStatus = 'expired' | 'expiring' | null;
 type ProductRecognition = { name: string; brand: string };
-type TransactionType = 'buy' | 'use';
-type Transaction = {
-  id: string;
-  item: string;
-  type: TransactionType;
-  quantity: number;
-  amount: number;
-  date: string;
-};
 
 const STORAGE_KEY = 'beauty-shelf-products';
-const TRANSACTIONS_STORAGE_KEY = 'beauty-shelf-transactions';
 const CATEGORIES = ['全部', '保養', '彩妝', '清潔', '防曬'];
 const tones = [
   'bg-[hsl(183_45%_80%)]',
@@ -102,60 +92,6 @@ function normalizeProduct(value: unknown): Product | null {
     openedDate:
       typeof product.openedDate === 'string' ? product.openedDate : '',
   };
-}
-
-function normalizeTransaction(value: unknown): Transaction | null {
-  if (!value || typeof value !== 'object') return null;
-
-  const transaction = value as Partial<Transaction>;
-  if (
-    typeof transaction.id !== 'string' ||
-    !transaction.id ||
-    typeof transaction.item !== 'string' ||
-    !transaction.item.trim() ||
-    (transaction.type !== 'buy' && transaction.type !== 'use') ||
-    typeof transaction.quantity !== 'number' ||
-    !Number.isFinite(transaction.quantity) ||
-    transaction.quantity <= 0 ||
-    typeof transaction.amount !== 'number' ||
-    !Number.isFinite(transaction.amount) ||
-    transaction.amount < 0 ||
-    typeof transaction.date !== 'string' ||
-    !transaction.date
-  ) {
-    return null;
-  }
-
-  return {
-    id: transaction.id,
-    item: transaction.item.trim(),
-    type: transaction.type,
-    quantity: Math.max(1, Math.floor(transaction.quantity)),
-    amount: transaction.amount,
-    date: transaction.date,
-  };
-}
-
-function readTransactions(): Transaction[] {
-  try {
-    const saved: unknown = JSON.parse(
-      localStorage.getItem(TRANSACTIONS_STORAGE_KEY) || '[]',
-    );
-    return Array.isArray(saved)
-      ? saved
-          .map(normalizeTransaction)
-          .filter((transaction): transaction is Transaction => !!transaction)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function createTransactionId() {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function addMonths(date: Date, months: number) {
@@ -773,195 +709,6 @@ function ProductTile({
   );
 }
 
-function TransactionsSection({
-  transactions,
-  onAdd,
-  onClear,
-}: {
-  transactions: Transaction[];
-  onAdd: (transaction: Transaction) => void;
-  onClear: () => void;
-}) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [item, setItem] = useState('');
-  const [type, setType] = useState<TransactionType>('buy');
-  const [quantity, setQuantity] = useState('1');
-  const [amount, setAmount] = useState('0');
-  const [date, setDate] = useState(today);
-  const [error, setError] = useState('');
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    const parsedQuantity = Math.floor(Number(quantity));
-    const parsedAmount = Number(amount);
-
-    if (!item.trim()) {
-      setError('請輸入物品名稱。');
-      return;
-    }
-    if (!Number.isFinite(parsedQuantity) || parsedQuantity < 1) {
-      setError('數量必須是至少 1 件。');
-      return;
-    }
-    if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
-      setError('金額不可少於 0。');
-      return;
-    }
-    if (!date) {
-      setError('請選擇日期。');
-      return;
-    }
-
-    onAdd({
-      id: createTransactionId(),
-      item: item.trim(),
-      type,
-      quantity: parsedQuantity,
-      amount: parsedAmount,
-      date,
-    });
-    setItem('');
-    setType('buy');
-    setQuantity('1');
-    setAmount('0');
-    setDate(new Date().toISOString().slice(0, 10));
-    setError('');
-  };
-
-  return (
-    <section className="organize-in organize-delay-3 mt-8 rounded-[26px] bg-[hsl(var(--drawer-panel))] p-4 sm:p-6">
-      <div className="flex items-end justify-between gap-3">
-        <div>
-          <p className="text-[10px] font-bold tracking-[.18em] text-[hsl(var(--drawer-coral))]">
-            使用足跡
-          </p>
-          <h2 className="mt-1 text-2xl font-black">交易紀錄</h2>
-        </div>
-        <button
-          type="button"
-          onClick={onClear}
-          disabled={transactions.length === 0}
-          className="rounded-lg border border-[hsl(var(--drawer-coral)/.4)] px-3 py-2 text-xs font-extrabold text-[hsl(var(--drawer-coral-dark))] disabled:cursor-not-allowed disabled:opacity-35"
-        >
-          清空全部紀錄
-        </button>
-      </div>
-
-      <form onSubmit={submit} className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-        <div className="lg:col-span-2">
-          <FieldLabel htmlFor="transaction-item">物品</FieldLabel>
-          <input
-            id="transaction-item"
-            value={item}
-            onChange={(event) => setItem(event.target.value)}
-            placeholder="例如：維他命 C 精華"
-            className="h-10 w-full rounded-lg border border-[hsl(var(--drawer-line))] bg-white px-3 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
-          />
-        </div>
-        <div>
-          <FieldLabel htmlFor="transaction-type">交易類型</FieldLabel>
-          <select
-            id="transaction-type"
-            value={type}
-            onChange={(event) => setType(event.target.value as TransactionType)}
-            className="h-10 w-full rounded-lg border border-[hsl(var(--drawer-line))] bg-white px-3 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
-          >
-            <option value="buy">買入</option>
-            <option value="use">使用</option>
-          </select>
-        </div>
-        <div>
-          <FieldLabel htmlFor="transaction-quantity">數量</FieldLabel>
-          <input
-            id="transaction-quantity"
-            type="number"
-            min="1"
-            step="1"
-            value={quantity}
-            onChange={(event) => setQuantity(event.target.value)}
-            className="h-10 w-full rounded-lg border border-[hsl(var(--drawer-line))] bg-white px-3 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
-          />
-        </div>
-        <div>
-          <FieldLabel htmlFor="transaction-amount">金額</FieldLabel>
-          <input
-            id="transaction-amount"
-            type="number"
-            min="0"
-            step="0.01"
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            className="h-10 w-full rounded-lg border border-[hsl(var(--drawer-line))] bg-white px-3 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
-          />
-        </div>
-        <div>
-          <FieldLabel htmlFor="transaction-date">日期</FieldLabel>
-          <input
-            id="transaction-date"
-            type="date"
-            value={date}
-            onChange={(event) => setDate(event.target.value)}
-            className="h-10 w-full rounded-lg border border-[hsl(var(--drawer-line))] bg-white px-3 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
-          />
-        </div>
-        <div className="sm:col-span-2 lg:col-span-6">
-          <button
-            type="submit"
-            className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[hsl(var(--drawer-ink))] px-4 text-sm font-extrabold text-white"
-          >
-            <Plus size={16} />
-            新增紀錄
-          </button>
-        </div>
-      </form>
-      {error && (
-        <p role="alert" className="mt-2 text-xs font-bold text-[hsl(var(--drawer-coral-dark))]">
-          {error}
-        </p>
-      )}
-
-      {transactions.length === 0 ? (
-        <div className="mt-5 rounded-xl border border-dashed border-[hsl(var(--drawer-line))] px-4 py-8 text-center text-sm text-[hsl(var(--drawer-muted))]">
-          暫時未有交易紀錄
-        </div>
-      ) : (
-        <div className="mt-5 overflow-x-auto">
-          <table className="w-full min-w-[620px] border-collapse text-left text-xs">
-            <thead>
-              <tr className="border-b border-[hsl(var(--drawer-line))] text-[hsl(var(--drawer-muted))]">
-                <th className="px-2 py-2 font-bold">日期</th>
-                <th className="px-2 py-2 font-bold">物品</th>
-                <th className="px-2 py-2 font-bold">類型</th>
-                <th className="px-2 py-2 text-right font-bold">數量</th>
-                <th className="px-2 py-2 text-right font-bold">金額</th>
-              </tr>
-            </thead>
-            <tbody>
-              {transactions.map((transaction) => (
-                <tr key={transaction.id} className="border-b border-[hsl(var(--drawer-line)/.7)] last:border-0">
-                  <td className="px-2 py-3 text-[hsl(var(--drawer-muted))]">{transaction.date}</td>
-                  <td className="px-2 py-3 font-bold">{transaction.item}</td>
-                  <td className="px-2 py-3">
-                    <span className={`rounded-full px-2 py-1 font-bold ${
-                      transaction.type === 'buy'
-                        ? 'bg-[hsl(77_62%_58%/.38)]'
-                        : 'bg-[hsl(183_45%_80%)]'
-                    }`}>
-                      {transaction.type === 'buy' ? '買入' : '使用'}
-                    </span>
-                  </td>
-                  <td className="px-2 py-3 text-right font-bold">{transaction.quantity}</td>
-                  <td className="px-2 py-3 text-right font-bold">${transaction.amount.toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export default function App() {
   const [products, setProducts] = useState<Product[]>(() => {
     try {
@@ -973,7 +720,6 @@ export default function App() {
       return [];
     }
   });
-  const [transactions, setTransactions] = useState<Transaction[]>(readTransactions);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('全部');
   const [sheetProduct, setSheetProduct] = useState<Product | null | undefined>(
@@ -988,17 +734,6 @@ export default function App() {
       // Keep the in-memory app usable if browser storage is unavailable or full.
     }
   }, [products]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        TRANSACTIONS_STORAGE_KEY,
-        JSON.stringify(transactions),
-      );
-    } catch {
-      // Keep the in-memory records visible if browser storage is unavailable.
-    }
-  }, [transactions]);
 
   const filtered = useMemo(
     () =>
@@ -1040,27 +775,6 @@ export default function App() {
         ? current.map((item) => (item.id === product.id ? product : item))
         : [product, ...current];
     });
-
-  const addTransaction = (transaction: Transaction) => {
-    setTransactions((current) => [transaction, ...current]);
-  };
-
-  const clearTransactions = () => {
-    if (
-      !window.confirm(
-        '確定要清空全部交易紀錄嗎？此操作不能復原。',
-      )
-    ) {
-      return;
-    }
-
-    setTransactions([]);
-    try {
-      localStorage.removeItem(TRANSACTIONS_STORAGE_KEY);
-    } catch {
-      // The visible state is still cleared even if storage is unavailable.
-    }
-  };
 
   const openNewProduct = () => setSheetProduct(null);
 
@@ -1229,12 +943,6 @@ export default function App() {
               ))}
             </div>
           )}
-
-          <TransactionsSection
-            transactions={transactions}
-            onAdd={addTransaction}
-            onClear={clearTransactions}
-          />
 
           <footer className="mt-8 flex justify-between border-t border-[hsl(var(--drawer-line))] pt-5 text-xs text-[hsl(var(--drawer-muted))]">
             <span className="flex items-center gap-1.5">
