@@ -13,37 +13,61 @@ const supportedImageDataUrl =
 type DeepSeekCompletion = {
   choices?: Array<{
     message?: {
-      content?: string;
+      content?: string | Array<{ type?: string; text?: string }>;
     };
   }>;
 };
 
-function parseRecognition(content: string): { name: string; brand: string } | null {
-  const cleaned = content
-    .trim()
-    .replace(/^```json\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
+function contentToText(
+  content: string | Array<{ type?: string; text?: string }> | undefined,
+): string {
+  if (typeof content === "string") return content;
 
-  try {
-    const value: unknown = JSON.parse(cleaned);
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      "name" in value &&
-      "brand" in value &&
-      typeof value.name === "string" &&
-      typeof value.brand === "string" &&
-      value.name.trim() &&
-      value.brand.trim()
-    ) {
-      return { name: value.name.trim(), brand: value.brand.trim() };
+  return (
+    content
+      ?.filter((part) => part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n") ?? ""
+  );
+}
+
+function parseRecognition(content: string): { name: string; brand: string } | null {
+  const cleaned = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const candidates = [cleaned];
+  const objectStart = cleaned.indexOf("{");
+  const objectEnd = cleaned.lastIndexOf("}");
+
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    candidates.push(cleaned.slice(objectStart, objectEnd + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const value: unknown = JSON.parse(candidate);
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "name" in value &&
+        "brand" in value &&
+        typeof value.name === "string" &&
+        typeof value.brand === "string" &&
+        value.name.trim() &&
+        value.brand.trim()
+      ) {
+        return { name: value.name.trim(), brand: value.brand.trim() };
+      }
+    } catch {
+      // Try the next possible JSON section. Vision models sometimes add a
+      // short explanation before or after the requested JSON object.
     }
-  } catch {
-    return null;
   }
 
   return null;
+}
+
+function parseCompletion(payload: DeepSeekCompletion): { name: string; brand: string } | null {
+  const content = contentToText(payload.choices?.[0]?.message?.content);
+  return parseRecognition(content);
 }
 
 router.post(
@@ -95,13 +119,15 @@ router.post(
         },
         body: JSON.stringify({
           model: "deepseek-v4-flash-vision-exp",
-          response_format: { type: "json_object" },
           messages: [
             {
               role: "user",
               content: [
                 { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: imageData } },
+                {
+                  type: "image_url",
+                  image_url: { url: imageData, detail: "high" },
+                },
               ],
             },
           ],
@@ -120,9 +146,7 @@ router.post(
       }
 
       const payload = (await response.json()) as DeepSeekCompletion;
-      const recognition = parseRecognition(
-        payload.choices?.[0]?.message?.content ?? "",
-      );
+      const recognition = parseCompletion(payload);
 
       if (!recognition) {
         req.log.warn("DeepSeek returned an unrecognized product response");
