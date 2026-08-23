@@ -42,8 +42,12 @@ type Product = {
 
 type ExpiryStatus = 'expired' | 'expiring' | null;
 type ProductRecognition = { name: string; brand: string };
+type SaveResult = { ok: true } | { ok: false; message: string };
 
 const STORAGE_KEY = 'beauty-shelf-products';
+const THUMBNAIL_MAX_EDGE = 480;
+const THUMBNAIL_MIN_EDGE = 160;
+const THUMBNAIL_MAX_DATA_URL_LENGTH = 160_000;
 const CATEGORIES = ['全部', '保養', '彩妝', '清潔', '防曬'];
 const tones = [
   'bg-[hsl(183_45%_80%)]',
@@ -52,6 +56,123 @@ const tones = [
   'bg-[hsl(257_55%_86%)]',
   'bg-[hsl(42_83%_78%)]',
 ];
+
+function isQuotaExceededError(error: unknown) {
+  if (!(error instanceof DOMException)) return false;
+  return (
+    error.name === 'QuotaExceededError' ||
+    error.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    error.code === 22 ||
+    error.code === 1014
+  );
+}
+
+function getStorageErrorMessage(error: unknown) {
+  return isQuotaExceededError(error)
+    ? '儲存空間已滿，這次變更尚未保存。請移除一件舊商品或將照片移除後再試。'
+    : '無法保存到此瀏覽器，這次變更尚未保存。請確認瀏覽器沒有封鎖本機儲存後再試。';
+}
+
+function loadImage(dataUrl: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Image could not be decoded'));
+    image.src = dataUrl;
+  });
+}
+
+async function decodeImageForThumbnail(dataUrl: string) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const blob = await (await fetch(dataUrl)).blob();
+      const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+      return {
+        source: bitmap as CanvasImageSource,
+        width: bitmap.width,
+        height: bitmap.height,
+        dispose: () => bitmap.close(),
+      };
+    } catch {
+      // Some older mobile browsers do not support orientation-aware ImageBitmap decoding.
+    }
+  }
+
+  const image = await loadImage(dataUrl);
+  return {
+    source: image as CanvasImageSource,
+    width: image.naturalWidth,
+    height: image.naturalHeight,
+    dispose: () => undefined,
+  };
+}
+
+function makeJpegThumbnail(
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+  quality: number,
+) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { alpha: false });
+
+  if (!context) throw new Error('Canvas is unavailable');
+
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  context.drawImage(source, 0, 0, width, height);
+  return canvas.toDataURL('image/jpeg', quality);
+}
+
+async function createStorageThumbnail(imageData: string) {
+  if (!imageData) return '';
+  if (!imageData.startsWith('data:image/')) return imageData;
+
+  const decoded = await decodeImageForThumbnail(imageData);
+
+  try {
+    const initialScale = Math.min(
+      1,
+      THUMBNAIL_MAX_EDGE / Math.max(decoded.width, decoded.height),
+    );
+    let width = Math.max(1, Math.round(decoded.width * initialScale));
+    let height = Math.max(1, Math.round(decoded.height * initialScale));
+    let smallest = '';
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      for (const quality of [0.78, 0.68, 0.58, 0.48]) {
+        const candidate = makeJpegThumbnail(
+          decoded.source,
+          width,
+          height,
+          quality,
+        );
+        if (!smallest || candidate.length < smallest.length) smallest = candidate;
+        if (candidate.length <= THUMBNAIL_MAX_DATA_URL_LENGTH) return candidate;
+      }
+
+      if (
+        Math.max(width, height) <= THUMBNAIL_MIN_EDGE ||
+        Math.min(width, height) <= 1
+      ) {
+        break;
+      }
+
+      width = Math.max(1, Math.round(width * 0.72));
+      height = Math.max(1, Math.round(height * 0.72));
+    }
+
+    if (smallest && smallest.length <= THUMBNAIL_MAX_DATA_URL_LENGTH) {
+      return smallest;
+    }
+
+    throw new Error('Thumbnail remains too large');
+  } finally {
+    decoded.dispose();
+  }
+}
 
 function normalizeProduct(value: unknown): Product | null {
   if (!value || typeof value !== 'object') return null;
@@ -189,7 +310,7 @@ function AddSheet({
   onClose,
 }: {
   product: Product | null;
-  onSave: (product: Product) => void;
+  onSave: (product: Product) => SaveResult;
   onClose: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -214,6 +335,7 @@ function AddSheet({
   const [error, setError] = useState('');
   const [aiMessage, setAiMessage] = useState('');
   const [isRecognizing, setIsRecognizing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   const recognize = async (imageData: string) => {
     setAiMessage('DeepSeek 正在辨識商品包裝…');
@@ -261,10 +383,13 @@ function AddSheet({
       setError('');
       recognize(imageData);
     };
+    reader.onerror = () => {
+      setError('無法讀取這張照片，請選擇另一張後再試。');
+    };
     reader.readAsDataURL(file);
   };
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!name.trim()) {
       setError('請輸入商品名稱。');
@@ -273,26 +398,42 @@ function AddSheet({
 
     const parsedPrice = Number(price);
     const parsedPao = Number(paoMonths);
-    onSave({
-      id: product?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      name: name.trim(),
-      brand: brand.trim(),
-      quantity: Math.max(0, Math.floor(Number(quantity) || 0)),
-      category,
-      image,
-      price:
-        price.trim() && Number.isFinite(parsedPrice) && parsedPrice >= 0
-          ? parsedPrice
-          : undefined,
-      purchaseLocation: purchaseLocation.trim(),
-      unopenedExpiryDate,
-      paoMonths:
-        paoMonths.trim() && Number.isFinite(parsedPao) && parsedPao > 0
-          ? Math.floor(parsedPao)
-          : undefined,
-      openedDate,
-    });
-    onClose();
+    setError('');
+    setIsSaving(true);
+
+    try {
+      const savedImage = await createStorageThumbnail(image);
+      const result = onSave({
+        id: product?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: name.trim(),
+        brand: brand.trim(),
+        quantity: Math.max(0, Math.floor(Number(quantity) || 0)),
+        category,
+        image: savedImage,
+        price:
+          price.trim() && Number.isFinite(parsedPrice) && parsedPrice >= 0
+            ? parsedPrice
+            : undefined,
+        purchaseLocation: purchaseLocation.trim(),
+        unopenedExpiryDate,
+        paoMonths:
+          paoMonths.trim() && Number.isFinite(parsedPao) && parsedPao > 0
+            ? Math.floor(parsedPao)
+            : undefined,
+        openedDate,
+      });
+
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+
+      onClose();
+    } catch {
+      setError('無法建立可保存的縮圖，請移除照片或選擇另一張後再試。');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const sheetTitle = product ? '編輯商品資料' : '新增一件商品';
@@ -341,6 +482,7 @@ function AddSheet({
           <button
             type="button"
             onClick={() => fileRef.current?.click()}
+            disabled={isSaving}
             className="relative flex h-32 w-full items-center justify-center gap-2 overflow-hidden rounded-2xl border border-dashed border-[hsl(var(--drawer-coral)/.5)] bg-[hsl(7_78%_59%/.06)] text-sm font-bold text-[hsl(var(--drawer-coral-dark))]"
           >
             {image ? (
@@ -361,6 +503,20 @@ function AddSheet({
               </>
             )}
           </button>
+          {image && (
+            <button
+              type="button"
+              onClick={() => {
+                setImage('');
+                setError('');
+                if (fileRef.current) fileRef.current.value = '';
+              }}
+              disabled={isSaving}
+              className="text-xs font-bold text-[hsl(var(--drawer-coral-dark))] disabled:opacity-50"
+            >
+              移除照片，僅保存商品資料
+            </button>
+          )}
           {aiMessage && (
             <p
               role="status"
@@ -519,9 +675,14 @@ function AddSheet({
           )}
           <button
             type="submit"
-            className="h-12 w-full rounded-xl bg-[hsl(var(--drawer-coral))] text-sm font-extrabold text-white"
+            disabled={isSaving}
+            className="h-12 w-full rounded-xl bg-[hsl(var(--drawer-coral))] text-sm font-extrabold text-white disabled:cursor-wait disabled:opacity-70"
           >
-            {product ? '儲存商品資料' : '放入我的抽屜'}
+            {isSaving
+              ? '正在確認保存…'
+              : product
+                ? '儲存商品資料'
+                : '放入我的抽屜'}
           </button>
         </form>
       </section>
@@ -720,20 +881,32 @@ export default function App() {
       return [];
     }
   });
+  const productsRef = useRef(products);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('全部');
   const [sheetProduct, setSheetProduct] = useState<Product | null | undefined>(
     undefined,
   );
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
+  const [storageError, setStorageError] = useState('');
 
-  useEffect(() => {
+  const persistProducts = (nextProducts: Product[]): SaveResult => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(products));
-    } catch {
-      // Keep the in-memory app usable if browser storage is unavailable or full.
+      const serialized = JSON.stringify(nextProducts);
+      localStorage.setItem(STORAGE_KEY, serialized);
+      if (localStorage.getItem(STORAGE_KEY) !== serialized) {
+        throw new Error('Storage write could not be verified');
+      }
+      productsRef.current = nextProducts;
+      setProducts(nextProducts);
+      setStorageError('');
+      return { ok: true };
+    } catch (error) {
+      const message = getStorageErrorMessage(error);
+      setStorageError(message);
+      return { ok: false, message };
     }
-  }, [products]);
+  };
 
   const filtered = useMemo(
     () =>
@@ -760,21 +933,31 @@ export default function App() {
   ).length;
 
   const updateQuantity = (id: string, amount: number) =>
-    setProducts((current) =>
-      current.map((product) =>
+    persistProducts(
+      productsRef.current.map((product) =>
         product.id === id
           ? { ...product, quantity: Math.max(0, product.quantity + amount) }
           : product,
       ),
     );
 
-  const saveProduct = (product: Product) =>
-    setProducts((current) => {
-      const exists = current.some((item) => item.id === product.id);
-      return exists
-        ? current.map((item) => (item.id === product.id ? product : item))
-        : [product, ...current];
-    });
+  const saveProduct = (product: Product) => {
+    const exists = productsRef.current.some((item) => item.id === product.id);
+    return persistProducts(
+      exists
+        ? productsRef.current.map((item) =>
+            item.id === product.id ? product : item,
+          )
+        : [product, ...productsRef.current],
+    );
+  };
+
+  const deleteProduct = (id: string) => {
+    const result = persistProducts(
+      productsRef.current.filter((product) => product.id !== id),
+    );
+    if (result.ok) setDeleteTarget(null);
+  };
 
   const openNewProduct = () => setSheetProduct(null);
 
@@ -803,6 +986,14 @@ export default function App() {
               新增
             </button>
           </header>
+          {storageError && (
+            <p
+              role="alert"
+              className="organize-in mt-4 rounded-xl bg-[hsl(7_78%_59%/.12)] px-3 py-2.5 text-xs font-bold leading-5 text-[hsl(var(--drawer-coral-dark))]"
+            >
+              {storageError}
+            </p>
+          )}
 
           <section className="organize-in organize-delay-1 mt-7 rounded-[27px] bg-[hsl(var(--drawer-ink))] p-5 text-white drawer-shadow sm:p-7">
             <div className="flex items-start justify-between">
@@ -969,10 +1160,7 @@ export default function App() {
           product={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => {
-            setProducts((current) =>
-              current.filter((product) => product.id !== deleteTarget.id),
-            );
-            setDeleteTarget(null);
+            deleteProduct(deleteTarget.id);
           }}
         />
       )}
