@@ -328,6 +328,7 @@ function AddSheet({
   const [quantity, setQuantity] = useState(String(product?.quantity ?? 1));
   const [category, setCategory] = useState(product?.category ?? '保養');
   const [image, setImage] = useState(product?.image ?? '');
+  const [imageNeedsProcessing, setImageNeedsProcessing] = useState(false);
   const [price, setPrice] = useState(
     product?.price === undefined ? '' : String(product.price),
   );
@@ -389,6 +390,7 @@ function AddSheet({
     reader.onload = () => {
       const imageData = String(reader.result);
       setImage(imageData);
+      setImageNeedsProcessing(true);
       setError('');
       recognize(imageData);
     };
@@ -411,7 +413,9 @@ function AddSheet({
     setIsSaving(true);
 
     try {
-      const savedImage = await createStorageThumbnail(image);
+      const savedImage = imageNeedsProcessing
+        ? await createStorageThumbnail(image)
+        : image;
       const result = onSave({
         id: product?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         name: name.trim(),
@@ -439,7 +443,9 @@ function AddSheet({
 
       onClose();
     } catch {
-      setError('無法建立可保存的縮圖，請移除照片或選擇另一張後再試。');
+      setError(
+        '這張照片無法在保留清晰度下安全保存。請移除照片或選擇另一張後再試。',
+      );
     } finally {
       setIsSaving(false);
     }
@@ -517,6 +523,7 @@ function AddSheet({
               type="button"
               onClick={() => {
                 setImage('');
+                setImageNeedsProcessing(false);
                 setError('');
                 if (fileRef.current) fileRef.current.value = '';
               }}
@@ -772,24 +779,62 @@ function ProductTile({
   const expiryDate = getExpiryDate(product);
 
   return (
-    <article className="drawer-card overflow-hidden rounded-[22px] border border-[hsl(var(--drawer-line))] bg-[hsl(var(--drawer-panel))]">
-      <div className="relative aspect-[1.18/1]">
+    <article className="drawer-card flex gap-3 rounded-[20px] border border-[hsl(var(--drawer-line))] bg-[hsl(var(--drawer-panel))] p-3 shadow-[0_8px_22px_hsl(222_35%_17%/.05)] sm:p-3.5">
+      <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-[15px] bg-[hsl(var(--drawer-paper))] sm:h-[72px] sm:w-[72px]">
         <ProductVisual product={product} />
-        <div className="absolute left-3 top-3 flex max-w-[72%] flex-wrap gap-1.5">
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start gap-2">
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label={`編輯 ${product.name}`}
+            className="min-w-0 flex-1 text-left"
+          >
+            <h3 className="truncate text-[15px] font-extrabold leading-5 text-[hsl(var(--drawer-ink))]">
+              {product.name}
+            </h3>
+            <p className="mt-1 truncate text-[11px] font-medium text-[hsl(var(--drawer-muted))]">
+              {[
+                product.brand || '未標示品牌',
+                product.category,
+                product.price !== undefined ? `$${product.price}` : '',
+                product.purchaseLocation,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          </button>
+          <div className="shrink-0 text-right">
+            <strong
+              className={`block text-[28px] font-black leading-6 tracking-tight ${
+                empty
+                  ? 'text-[hsl(var(--drawer-coral))]'
+                  : 'text-[hsl(var(--drawer-ink))]'
+              }`}
+            >
+              {product.quantity}
+            </strong>
+            <span className="text-[9px] font-bold text-[hsl(var(--drawer-muted))]">
+              件
+            </span>
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <span
-            className={`rounded-full px-2 py-1 text-[10px] font-extrabold ${
+            className={`rounded-full px-2 py-1 text-[9px] font-extrabold ${
               empty
                 ? 'bg-[hsl(var(--drawer-ink))] text-white'
                 : product.quantity < 2
                   ? 'bg-[hsl(42_83%_78%)] text-[hsl(var(--drawer-ink))]'
-                  : 'bg-[hsl(0_0%_100%/.82)] text-[hsl(var(--drawer-ink))]'
+                  : 'bg-[hsl(var(--drawer-paper))] text-[hsl(var(--drawer-muted))]'
             }`}
           >
             {empty ? '用曬啦' : product.quantity < 2 ? '快用完' : '使用中'}
           </span>
           {expiry && (
             <span
-              className={`rounded-full px-2 py-1 text-[10px] font-extrabold ${
+              className={`rounded-full px-2 py-1 text-[9px] font-extrabold ${
                 expiry === 'expired'
                   ? 'bg-[hsl(var(--drawer-coral))] text-white'
                   : 'bg-[hsl(42_83%_78%)] text-[hsl(var(--drawer-ink))]'
@@ -798,61 +843,19 @@ function ProductTile({
               {expiry === 'expired' ? '已過期' : '即將過期'}
             </span>
           )}
-        </div>
-        <div className="absolute right-2.5 top-2.5 flex gap-1.5">
-          <button
-            type="button"
-            onClick={onEdit}
-            aria-label={`編輯 ${product.name}`}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[hsl(0_0%_100%/.86)]"
-          >
-            <Pencil size={14} />
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            aria-label={`刪除 ${product.name}`}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-[hsl(0_0%_100%/.86)]"
-          >
-            <Trash2 size={15} />
-          </button>
-        </div>
-      </div>
-      <div className="p-3.5">
-        <div className="flex min-h-[56px] items-start justify-between gap-2">
-          <div className="min-w-0">
-            <p className="truncate text-[10px] font-bold text-[hsl(var(--drawer-muted))]">
-              {product.brand || product.category}
-            </p>
-            <h3 className="mt-1 line-clamp-2 text-sm font-extrabold leading-5">
-              {product.name}
-            </h3>
-          </div>
-          <div className="shrink-0 text-right">
-            <strong
-              className={`block text-2xl font-black leading-none ${
-                empty ? 'text-[hsl(var(--drawer-coral))]' : ''
+          {expiryDate && (
+            <span
+              className={`text-[10px] font-bold ${
+                expiry
+                  ? 'text-[hsl(var(--drawer-coral-dark))]'
+                  : 'text-[hsl(var(--drawer-muted))]'
               }`}
             >
-              {product.quantity}
-            </strong>
-            <span className="text-[9px] text-[hsl(var(--drawer-muted))]">件</span>
-          </div>
+              至 {formatDate(expiryDate)}
+            </span>
+          )}
         </div>
-        {(expiryDate || product.price !== undefined || product.purchaseLocation) && (
-          <div className="mt-2 space-y-1 border-t border-[hsl(var(--drawer-line))] pt-2 text-[10px] text-[hsl(var(--drawer-muted))]">
-            {expiryDate && (
-              <p className={expiry ? 'font-bold text-[hsl(var(--drawer-coral-dark))]' : ''}>
-                有效至 {formatDate(expiryDate)}
-              </p>
-            )}
-            <p className="flex items-center justify-between gap-2">
-              <span>{product.purchaseLocation || product.category}</span>
-              {product.price !== undefined && <span>${product.price}</span>}
-            </p>
-          </div>
-        )}
-        <div className="mt-3 grid grid-cols-4 gap-1.5">
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
           {[1, 2, 3].map((amount) => (
             <button
               key={amount}
@@ -860,7 +863,7 @@ function ProductTile({
               disabled={empty}
               onClick={() => onChange(-amount)}
               aria-label={`從${product.name}扣除${amount}件`}
-              className="flex h-9 items-center justify-center rounded-lg border border-[hsl(var(--drawer-line))] text-xs font-extrabold disabled:opacity-30"
+              className="flex h-7 min-w-8 items-center justify-center rounded-lg border border-[hsl(var(--drawer-line))] px-1.5 text-[10px] font-extrabold disabled:opacity-30"
             >
               −{amount}
             </button>
@@ -869,9 +872,26 @@ function ProductTile({
             type="button"
             onClick={() => onChange(1)}
             aria-label={`替${product.name}補貨一件`}
-            className="flex h-9 items-center justify-center rounded-lg bg-[hsl(77_62%_58%/.38)] text-xs font-extrabold"
+            className="flex h-7 min-w-8 items-center justify-center rounded-lg bg-[hsl(77_62%_58%/.38)] px-1.5 text-[10px] font-extrabold"
           >
             +1
+          </button>
+          <span className="mx-0.5 h-4 w-px bg-[hsl(var(--drawer-line))]" />
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label={`編輯 ${product.name}`}
+            className="flex h-7 w-7 items-center justify-center rounded-lg bg-[hsl(var(--drawer-paper))] text-[hsl(var(--drawer-muted))]"
+          >
+            <Pencil size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            aria-label={`刪除 ${product.name}`}
+            className="flex h-7 w-7 items-center justify-center rounded-lg bg-[hsl(7_78%_59%/.1)] text-[hsl(var(--drawer-coral-dark))]"
+          >
+            <Trash2 size={13} />
           </button>
         </div>
       </div>
@@ -1131,7 +1151,7 @@ export default function App() {
               </button>
             </section>
           ) : (
-            <div className="organize-in organize-delay-3 mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="organize-in organize-delay-3 mt-6 space-y-3">
               {filtered.map((product) => (
                 <ProductTile
                   key={product.id}
