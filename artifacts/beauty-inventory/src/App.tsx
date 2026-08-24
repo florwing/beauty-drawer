@@ -45,9 +45,9 @@ type ProductRecognition = { name: string; brand: string };
 type SaveResult = { ok: true } | { ok: false; message: string };
 
 const STORAGE_KEY = 'beauty-shelf-products';
-const THUMBNAIL_MAX_EDGE = 480;
-const THUMBNAIL_MIN_EDGE = 160;
-const THUMBNAIL_MAX_DATA_URL_LENGTH = 160_000;
+const THUMBNAIL_MAX_EDGE = 512;
+const THUMBNAIL_MIN_EDGE = 320;
+const THUMBNAIL_MAX_DATA_URL_LENGTH = 220_000;
 const CATEGORIES = ['全部', '保養', '彩妝', '清潔', '防曬'];
 const tones = [
   'bg-[hsl(183_45%_80%)]',
@@ -107,7 +107,7 @@ async function decodeImageForThumbnail(dataUrl: string) {
   };
 }
 
-function makeJpegThumbnail(
+function makeStorageThumbnail(
   source: CanvasImageSource,
   width: number,
   height: number,
@@ -123,7 +123,11 @@ function makeJpegThumbnail(
   context.fillStyle = '#ffffff';
   context.fillRect(0, 0, width, height);
   context.drawImage(source, 0, 0, width, height);
-  return canvas.toDataURL('image/jpeg', quality);
+
+  const webp = canvas.toDataURL('image/webp', quality);
+  return webp.startsWith('data:image/webp')
+    ? webp
+    : canvas.toDataURL('image/jpeg', quality);
 }
 
 async function createStorageThumbnail(imageData: string) {
@@ -141,9 +145,9 @@ async function createStorageThumbnail(imageData: string) {
     let height = Math.max(1, Math.round(decoded.height * initialScale));
     let smallest = '';
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      for (const quality of [0.78, 0.68, 0.58, 0.48]) {
-        const candidate = makeJpegThumbnail(
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      for (const quality of [0.88, 0.82, 0.76, 0.7, 0.64]) {
+        const candidate = makeStorageThumbnail(
           decoded.source,
           width,
           height,
@@ -160,8 +164,13 @@ async function createStorageThumbnail(imageData: string) {
         break;
       }
 
-      width = Math.max(1, Math.round(width * 0.72));
-      height = Math.max(1, Math.round(height * 0.72));
+      const scale = Math.max(
+        THUMBNAIL_MIN_EDGE / Math.max(decoded.width, decoded.height),
+        (Math.max(width, height) * 0.84) /
+          Math.max(decoded.width, decoded.height),
+      );
+      width = Math.max(1, Math.round(decoded.width * scale));
+      height = Math.max(1, Math.round(decoded.height * scale));
     }
 
     if (smallest && smallest.length <= THUMBNAIL_MAX_DATA_URL_LENGTH) {
