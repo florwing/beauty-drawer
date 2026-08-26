@@ -14,8 +14,12 @@ import {
   Box,
   CalendarClock,
   Check,
+  Cloud,
   ImagePlus,
   LoaderCircle,
+  LogIn,
+  LogOut,
+  Mail,
   Pencil,
   Plus,
   Search,
@@ -25,6 +29,9 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import type { Session, User } from '@supabase/supabase-js';
+
+import { PRODUCT_THUMBNAILS_BUCKET, supabase } from '@/lib/supabase';
 
 type Product = {
   id: string;
@@ -33,6 +40,7 @@ type Product = {
   quantity: number;
   category: string;
   image?: string;
+  imagePath?: string;
   price?: number;
   purchaseLocation?: string;
   unopenedExpiryDate?: string;
@@ -43,8 +51,36 @@ type Product = {
 type ExpiryStatus = 'expired' | 'expiring' | null;
 type ProductRecognition = { name: string; brand: string };
 type SaveResult = { ok: true } | { ok: false; message: string };
+type ProductRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  brand: string | null;
+  quantity: number;
+  category: string;
+  image_path: string | null;
+  price: number | null;
+  purchase_location: string | null;
+  unopened_expiry_date: string | null;
+  pao_months: number | null;
+  opened_date: string | null;
+};
+type MigrationMarker = {
+  status: 'pending' | 'complete';
+  productIds: string[];
+  completedIds: string[];
+  updatedAt: string;
+};
+type MigrationClaim = {
+  userId: string;
+  productIds: string[];
+  claimedAt: string;
+};
 
 const STORAGE_KEY = 'beauty-shelf-products';
+const LOCAL_BACKUP_KEY = 'beauty-shelf-products-backup';
+const MIGRATION_CLAIM_KEY = 'beauty-shelf-products-migration-claim';
+const MIGRATION_MARKER_PREFIX = 'beauty-shelf-products-migration:';
 const THUMBNAIL_MAX_EDGE = 512;
 const THUMBNAIL_MIN_EDGE = 320;
 const THUMBNAIL_MAX_DATA_URL_LENGTH = 220_000;
@@ -203,6 +239,8 @@ function normalizeProduct(value: unknown): Product | null {
     quantity: Math.max(0, Math.floor(product.quantity)),
     category: product.category,
     image: typeof product.image === 'string' ? product.image : '',
+    imagePath:
+      typeof product.imagePath === 'string' ? product.imagePath : '',
     price:
       typeof product.price === 'number' && Number.isFinite(product.price)
         ? product.price
@@ -221,6 +259,412 @@ function normalizeProduct(value: unknown): Product | null {
         : undefined,
     openedDate:
       typeof product.openedDate === 'string' ? product.openedDate : '',
+  };
+}
+
+function readProductsAtKey(key: string) {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(saved)
+      ? saved.map(normalizeProduct).filter((product): product is Product => !!product)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function readLocalProducts() {
+  return readProductsAtKey(STORAGE_KEY);
+}
+
+function localBackupKey(userId: string) {
+  return `${LOCAL_BACKUP_KEY}:${userId}`;
+}
+
+function readMigrationSource(userId: string) {
+  const perUserBackup = readProductsAtKey(localBackupKey(userId));
+  if (perUserBackup.length) return perUserBackup;
+  return readProductsAtKey(LOCAL_BACKUP_KEY);
+}
+
+function productToRow(
+  product: Product,
+  userId: string,
+  imagePath: string,
+): ProductRow {
+  return {
+    id: product.id,
+    user_id: userId,
+    name: product.name,
+    brand: product.brand?.trim() || null,
+    quantity: Math.max(0, Math.floor(product.quantity)),
+    category: product.category,
+    image_path: imagePath || null,
+    price:
+      typeof product.price === 'number' && Number.isFinite(product.price)
+        ? product.price
+        : null,
+    purchase_location: product.purchaseLocation?.trim() || null,
+    unopened_expiry_date: product.unopenedExpiryDate || null,
+    pao_months:
+      typeof product.paoMonths === 'number' && product.paoMonths > 0
+        ? Math.floor(product.paoMonths)
+        : null,
+    opened_date: product.openedDate || null,
+  };
+}
+
+function rowToProduct(row: ProductRow, image = ''): Product {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    brand: row.brand ?? '',
+    quantity: Math.max(0, Math.floor(Number(row.quantity) || 0)),
+    category: String(row.category),
+    image,
+    imagePath: row.image_path ?? '',
+    price:
+      row.price === null || row.price === undefined
+        ? undefined
+        : Number(row.price),
+    purchaseLocation: row.purchase_location ?? '',
+    unopenedExpiryDate: row.unopened_expiry_date ?? '',
+    paoMonths:
+      row.pao_months === null || row.pao_months === undefined
+        ? undefined
+        : Math.floor(Number(row.pao_months)),
+    openedDate: row.opened_date ?? '',
+  };
+}
+
+function cacheProducts(products: Product[]): SaveResult {
+  try {
+    const cacheValue = products.map(({ image: _image, ...product }) => product);
+    const serialized = JSON.stringify(cacheValue);
+    localStorage.setItem(STORAGE_KEY, serialized);
+    if (localStorage.getItem(STORAGE_KEY) !== serialized) {
+      throw new Error('Storage write could not be verified');
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: getStorageErrorMessage(error) };
+  }
+}
+
+function readMigrationMarker(userId: string): MigrationMarker | null {
+  try {
+    const value: unknown = JSON.parse(
+      localStorage.getItem(`${MIGRATION_MARKER_PREFIX}${userId}`) || 'null',
+    );
+    if (!value || typeof value !== 'object') return null;
+    const marker = value as Partial<MigrationMarker>;
+    if (
+      (marker.status !== 'pending' && marker.status !== 'complete') ||
+      !Array.isArray(marker.productIds) ||
+      !Array.isArray(marker.completedIds)
+    ) {
+      return null;
+    }
+    return {
+      status: marker.status,
+      productIds: marker.productIds.filter(
+        (item): item is string => typeof item === 'string',
+      ),
+      completedIds: marker.completedIds.filter(
+        (item): item is string => typeof item === 'string',
+      ),
+      updatedAt:
+        typeof marker.updatedAt === 'string'
+          ? marker.updatedAt
+          : new Date(0).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeMigrationMarker(userId: string, marker: MigrationMarker) {
+  localStorage.setItem(
+    `${MIGRATION_MARKER_PREFIX}${userId}`,
+    JSON.stringify(marker),
+  );
+}
+
+function readMigrationClaim(): MigrationClaim | null {
+  try {
+    const value: unknown = JSON.parse(
+      localStorage.getItem(MIGRATION_CLAIM_KEY) || 'null',
+    );
+    if (!value || typeof value !== 'object') return null;
+    const claim = value as Partial<MigrationClaim>;
+    if (typeof claim.userId !== 'string' || !Array.isArray(claim.productIds)) {
+      return null;
+    }
+    return {
+      userId: claim.userId,
+      productIds: claim.productIds.filter(
+        (item): item is string => typeof item === 'string',
+      ),
+      claimedAt:
+        typeof claim.claimedAt === 'string'
+          ? claim.claimedAt
+          : new Date(0).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function claimLocalProducts(userId: string, products: Product[]) {
+  const currentClaim = readMigrationClaim();
+  if (currentClaim && currentClaim.userId !== userId) return false;
+
+  const backupKey = localBackupKey(userId);
+  if (!localStorage.getItem(backupKey)) {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) localStorage.setItem(backupKey, raw);
+  }
+
+  const claim: MigrationClaim = {
+    userId,
+    productIds: products.map((product) => product.id),
+    claimedAt: currentClaim?.claimedAt ?? new Date().toISOString(),
+  };
+  localStorage.setItem(MIGRATION_CLAIM_KEY, JSON.stringify(claim));
+  return true;
+}
+
+function dataUrlExtension(dataUrl: string) {
+  return dataUrl.startsWith('data:image/webp') ? 'webp' : 'jpg';
+}
+
+async function dataUrlToBlob(dataUrl: string) {
+  return (await fetch(dataUrl)).blob();
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = String(error.message);
+    if (message.includes('row-level security')) {
+      return 'Supabase 權限設定未允許呢次操作，請檢查 products 同 Storage 嘅 RLS policy。';
+    }
+    if (message.includes('Failed to fetch')) {
+      return '暫時連唔到雲端，請檢查網絡後再試。';
+    }
+  }
+  return fallback;
+}
+
+async function fetchProductRows(userId: string) {
+  const { data, error } = await supabase
+    .from('products')
+    .select(
+      'id,user_id,name,brand,quantity,category,image_path,price,purchase_location,unopened_expiry_date,pao_months,opened_date',
+    )
+    .eq('user_id', userId);
+
+  if (error) throw error;
+  return (data ?? []) as ProductRow[];
+}
+
+async function downloadPrivateImage(imagePath: string) {
+  const { data, error } = await supabase.storage
+    .from(PRODUCT_THUMBNAILS_BUCKET)
+    .download(imagePath);
+  if (error) throw error;
+  return data;
+}
+
+async function uploadProductImage(
+  userId: string,
+  productId: string,
+  imageData: string,
+) {
+  const extension = dataUrlExtension(imageData);
+  const imagePath = `${userId}/${productId}/${crypto.randomUUID()}.${extension}`;
+  const blob = await dataUrlToBlob(imageData);
+  const { error } = await supabase.storage
+    .from(PRODUCT_THUMBNAILS_BUCKET)
+    .upload(imagePath, blob, {
+      cacheControl: '3600',
+      contentType: blob.type || `image/${extension}`,
+      upsert: true,
+    });
+  if (error) throw error;
+  return imagePath;
+}
+
+async function removeProductImage(imagePath: string) {
+  if (!imagePath) return;
+  const { error } = await supabase.storage
+    .from(PRODUCT_THUMBNAILS_BUCKET)
+    .remove([imagePath]);
+  if (error) throw error;
+}
+
+async function migrateLocalProducts(
+  user: User,
+  sourceProducts: Product[],
+  onProgress: (message: string) => void,
+) {
+  if (!sourceProducts.length) {
+    return { migrated: false, message: '' };
+  }
+
+  const existingClaim = readMigrationClaim();
+  if (existingClaim && existingClaim.userId !== user.id) {
+    return {
+      migrated: false,
+      message: '呢部瀏覽器嘅舊本機資料已由另一個帳戶認領，今次唔會重複匯入。',
+    };
+  }
+
+  if (!claimLocalProducts(user.id, sourceProducts)) {
+    throw new Error('本機資料已由另一個帳戶認領。');
+  }
+
+  const existingMarker = readMigrationMarker(user.id);
+  if (existingMarker?.status === 'complete') {
+    return { migrated: false, message: '' };
+  }
+
+  const productIds =
+    existingMarker?.productIds.length
+      ? existingMarker.productIds
+      : sourceProducts.map((product) => product.id);
+  const completedIds = new Set(existingMarker?.completedIds ?? []);
+  const sourceById = new Map(
+    sourceProducts.map((product) => [product.id, product]),
+  );
+
+  const writePendingMarker = () =>
+    writeMigrationMarker(user.id, {
+      status: 'pending',
+      productIds,
+      completedIds: [...completedIds],
+      updatedAt: new Date().toISOString(),
+    });
+
+  writePendingMarker();
+
+  for (let index = 0; index < productIds.length; index += 1) {
+    const productId = productIds[index];
+    if (completedIds.has(productId)) continue;
+
+    const product = sourceById.get(productId);
+    if (!product) {
+      throw new Error(`搵唔到待搬移商品 ${productId} 嘅原始本機資料。`);
+    }
+
+    onProgress(`正在搬移舊商品 ${index + 1} / ${productIds.length}…`);
+    const { data: existing, error: existingError } = await supabase
+      .from('products')
+      .select(
+        'id,user_id,name,brand,quantity,category,image_path,price,purchase_location,unopened_expiry_date,pao_months,opened_date',
+      )
+      .eq('user_id', user.id)
+      .eq('id', product.id)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+
+    let confirmedRow = existing as ProductRow | null;
+    let imagePath = confirmedRow?.image_path ?? '';
+    const localImage =
+      product.image?.startsWith('data:image/') ? product.image : '';
+    let uploadedPath = '';
+
+    if (confirmedRow && imagePath) {
+      try {
+        await downloadPrivateImage(imagePath);
+      } catch {
+        if (!localImage) throw new Error(`商品「${product.name}」嘅雲端縮圖遺失。`);
+        imagePath = await uploadProductImage(user.id, product.id, localImage);
+        uploadedPath = imagePath;
+        const { data, error } = await supabase
+          .from('products')
+          .update({ image_path: imagePath })
+          .eq('user_id', user.id)
+          .eq('id', product.id)
+          .select(
+            'id,user_id,name,brand,quantity,category,image_path,price,purchase_location,unopened_expiry_date,pao_months,opened_date',
+          )
+          .single();
+        if (error) {
+          await supabase.storage
+            .from(PRODUCT_THUMBNAILS_BUCKET)
+            .remove([uploadedPath]);
+          throw error;
+        }
+        confirmedRow = data as ProductRow;
+      }
+    } else if (localImage) {
+      imagePath = await uploadProductImage(user.id, product.id, localImage);
+      uploadedPath = imagePath;
+    }
+
+    if (!confirmedRow) {
+      const { data, error } = await supabase
+        .from('products')
+        .upsert(productToRow(product, user.id, imagePath), {
+          onConflict: 'user_id,id',
+        })
+        .select(
+          'id,user_id,name,brand,quantity,category,image_path,price,purchase_location,unopened_expiry_date,pao_months,opened_date',
+        )
+        .single();
+      if (error) {
+        if (uploadedPath) {
+          await supabase.storage
+            .from(PRODUCT_THUMBNAILS_BUCKET)
+            .remove([uploadedPath]);
+        }
+        throw error;
+      }
+      confirmedRow = data as ProductRow;
+    } else if (!confirmedRow.image_path && imagePath) {
+      const { data, error } = await supabase
+        .from('products')
+        .update({ image_path: imagePath })
+        .eq('user_id', user.id)
+        .eq('id', product.id)
+        .select(
+          'id,user_id,name,brand,quantity,category,image_path,price,purchase_location,unopened_expiry_date,pao_months,opened_date',
+        )
+        .single();
+      if (error) {
+        await supabase.storage
+          .from(PRODUCT_THUMBNAILS_BUCKET)
+          .remove([uploadedPath]);
+        throw error;
+      }
+      confirmedRow = data as ProductRow;
+    }
+
+    if (!confirmedRow || confirmedRow.user_id !== user.id) {
+      throw new Error(`商品「${product.name}」未能確認已保存到雲端。`);
+    }
+    if (localImage) {
+      if (!confirmedRow.image_path) {
+        throw new Error(`商品「${product.name}」未能確認雲端縮圖路徑。`);
+      }
+      await downloadPrivateImage(confirmedRow.image_path);
+    }
+
+    completedIds.add(product.id);
+    writePendingMarker();
+  }
+
+  writeMigrationMarker(user.id, {
+    status: 'complete',
+    productIds,
+    completedIds: productIds,
+    updatedAt: new Date().toISOString(),
+  });
+
+  return {
+    migrated: true,
+    message: `已安全搬移 ${productIds.length} 件舊本機商品，原有備份仍然保留。`,
   };
 }
 
@@ -319,7 +763,7 @@ function AddSheet({
   onClose,
 }: {
   product: Product | null;
-  onSave: (product: Product) => SaveResult;
+  onSave: (product: Product) => Promise<SaveResult>;
   onClose: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -416,13 +860,14 @@ function AddSheet({
       const savedImage = imageNeedsProcessing
         ? await createStorageThumbnail(image)
         : image;
-      const result = onSave({
+      const result = await onSave({
         id: product?.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         name: name.trim(),
         brand: brand.trim(),
         quantity: Math.max(0, Math.floor(Number(quantity) || 0)),
         category,
         image: savedImage,
+        imagePath: product?.imagePath ?? '',
         price:
           price.trim() && Number.isFinite(parsedPrice) && parsedPrice >= 0
             ? parsedPrice
@@ -899,18 +1344,197 @@ function ProductTile({
   );
 }
 
-export default function App() {
-  const [products, setProducts] = useState<Product[]>(() => {
-    try {
-      const saved: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-      return Array.isArray(saved)
-        ? saved.map(normalizeProduct).filter((product): product is Product => !!product)
-        : [];
-    } catch {
-      return [];
+function FullScreenLoading({ message }: { message: string }) {
+  return (
+    <div className="organized-beauty-root drawer-noise flex min-h-[100dvh] items-center justify-center bg-[hsl(var(--drawer-paper))] px-6">
+      <div className="text-center">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-[hsl(var(--drawer-ink))] text-[hsl(var(--drawer-lime))]">
+          <LoaderCircle size={25} className="animate-spin" />
+        </div>
+        <p className="mt-4 text-sm font-extrabold text-[hsl(var(--drawer-ink))]">
+          {message}
+        </p>
+        <p className="mt-1 text-xs text-[hsl(var(--drawer-muted))]">
+          請唔好關閉頁面
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState<'sign-in' | 'sign-up'>('sign-in');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!email.trim() || password.length < 6) {
+      setError('請輸入有效電郵，同埋最少 6 個字元嘅密碼。');
+      return;
     }
-  });
+
+    setIsSubmitting(true);
+    setError('');
+    setMessage('');
+
+    try {
+      if (mode === 'sign-up') {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+        if (signUpError) throw signUpError;
+        if (!data.session) {
+          setMessage('註冊成功。請到電郵完成確認，再返嚟登入。');
+        }
+      } else {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+        if (signInError) throw signInError;
+      }
+    } catch (authError) {
+      const raw =
+        authError && typeof authError === 'object' && 'message' in authError
+          ? String(authError.message)
+          : '';
+      setError(
+        raw.toLowerCase().includes('invalid login')
+          ? '電郵或密碼唔正確，請再試一次。'
+          : raw.toLowerCase().includes('already registered')
+            ? '呢個電郵已經註冊，請直接登入。'
+            : '暫時未能完成登入，請檢查資料同網絡後再試。',
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="organized-beauty-root drawer-noise min-h-[100dvh] bg-[hsl(var(--drawer-paper))] px-4 py-8 sm:py-14">
+      <main className="mx-auto max-w-md">
+        <div className="mb-6 flex items-center justify-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[hsl(var(--drawer-ink))] text-[hsl(var(--drawer-lime))]">
+            <Box size={21} />
+          </div>
+          <div>
+            <p className="text-base font-black">我的美妝抽屜</p>
+            <p className="text-[9px] font-bold tracking-[.22em] text-[hsl(var(--drawer-muted))]">
+              BEAUTY DRAWER
+            </p>
+          </div>
+        </div>
+
+        <section className="rounded-[28px] border border-[hsl(var(--drawer-line))] bg-[hsl(var(--drawer-panel))] p-5 shadow-[0_22px_55px_hsl(222_35%_17%/.09)] sm:p-7">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[hsl(var(--drawer-aqua)/.48)] text-[hsl(var(--drawer-ink))]">
+            <Cloud size={22} />
+          </div>
+          <h1 className="mt-5 text-2xl font-black">
+            {mode === 'sign-in' ? '登入你嘅抽屜' : '建立私人抽屜'}
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-[hsl(var(--drawer-muted))]">
+            商品同縮圖會安全同步到你自己嘅私人雲端空間。
+          </p>
+
+          <form onSubmit={submit} className="mt-6 space-y-4">
+            <div>
+              <FieldLabel htmlFor="auth-email">電郵</FieldLabel>
+              <div className="relative">
+                <Mail
+                  size={16}
+                  className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[hsl(var(--drawer-muted))]"
+                />
+                <input
+                  id="auth-email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  className="h-12 w-full rounded-xl border border-[hsl(var(--drawer-line))] bg-[hsl(var(--drawer-paper))] pl-10 pr-3 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
+                  placeholder="you@example.com"
+                />
+              </div>
+            </div>
+            <div>
+              <FieldLabel htmlFor="auth-password">密碼</FieldLabel>
+              <input
+                id="auth-password"
+                type="password"
+                minLength={6}
+                autoComplete={
+                  mode === 'sign-in' ? 'current-password' : 'new-password'
+                }
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                className="h-12 w-full rounded-xl border border-[hsl(var(--drawer-line))] bg-[hsl(var(--drawer-paper))] px-3.5 text-sm outline-none focus:border-[hsl(var(--drawer-coral))]"
+                placeholder="最少 6 個字元"
+              />
+            </div>
+            {error && (
+              <p
+                role="alert"
+                className="rounded-xl bg-[hsl(7_78%_59%/.12)] px-3 py-2.5 text-xs font-bold leading-5 text-[hsl(var(--drawer-coral-dark))]"
+              >
+                {error}
+              </p>
+            )}
+            {message && (
+              <p
+                role="status"
+                className="rounded-xl bg-[hsl(77_62%_58%/.24)] px-3 py-2.5 text-xs font-bold leading-5"
+              >
+                {message}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--drawer-coral))] text-sm font-extrabold text-white disabled:cursor-wait disabled:opacity-70"
+            >
+              {isSubmitting ? (
+                <LoaderCircle size={17} className="animate-spin" />
+              ) : (
+                <LogIn size={17} />
+              )}
+              {mode === 'sign-in' ? '登入' : '註冊'}
+            </button>
+          </form>
+
+          <button
+            type="button"
+            onClick={() => {
+              setMode((current) =>
+                current === 'sign-in' ? 'sign-up' : 'sign-in',
+              );
+              setError('');
+              setMessage('');
+            }}
+            className="mt-4 w-full text-center text-xs font-bold text-[hsl(var(--drawer-coral-dark))]"
+          >
+            {mode === 'sign-in'
+              ? '未有帳戶？立即註冊'
+              : '已經有帳戶？返去登入'}
+          </button>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [products, setProducts] = useState<Product[]>([]);
   const productsRef = useRef(products);
+  const activeUserIdRef = useRef<string | null>(null);
+  const objectUrlsRef = useRef(new Set<string>());
+  const loadRunRef = useRef(0);
+  const [loadedUserId, setLoadedUserId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('全部');
   const [sheetProduct, setSheetProduct] = useState<Product | null | undefined>(
@@ -918,24 +1542,188 @@ export default function App() {
   );
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [storageError, setStorageError] = useState('');
+  const [syncMessage, setSyncMessage] = useState('');
+  const [dataLoading, setDataLoading] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState('');
+  const [mutationBusy, setMutationBusy] = useState(false);
 
-  const persistProducts = (nextProducts: Product[]): SaveResult => {
-    try {
-      const serialized = JSON.stringify(nextProducts);
-      localStorage.setItem(STORAGE_KEY, serialized);
-      if (localStorage.getItem(STORAGE_KEY) !== serialized) {
-        throw new Error('Storage write could not be verified');
-      }
-      productsRef.current = nextProducts;
-      setProducts(nextProducts);
-      setStorageError('');
-      return { ok: true };
-    } catch (error) {
-      const message = getStorageErrorMessage(error);
-      setStorageError(message);
-      return { ok: false, message };
-    }
+  const clearObjectUrls = () => {
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    objectUrlsRef.current.clear();
   };
+
+  const applyRows = async (
+    rows: ProductRow[],
+    ownerUserId: string,
+    expectedRun?: number,
+  ) => {
+    if (activeUserIdRef.current !== ownerUserId) return false;
+
+    let imageFailures = 0;
+    const createdUrls: string[] = [];
+    const hydrated = await Promise.all(
+      rows.map(async (row) => {
+        let image = '';
+        if (row.image_path) {
+          try {
+            const blob = await downloadPrivateImage(row.image_path);
+            image = URL.createObjectURL(blob);
+            createdUrls.push(image);
+          } catch {
+            imageFailures += 1;
+          }
+        }
+        return rowToProduct(row, image);
+      }),
+    );
+
+    if (
+      activeUserIdRef.current !== ownerUserId ||
+      (expectedRun !== undefined && loadRunRef.current !== expectedRun)
+    ) {
+      createdUrls.forEach((url) => URL.revokeObjectURL(url));
+      return false;
+    }
+
+    clearObjectUrls();
+    createdUrls.forEach((url) => objectUrlsRef.current.add(url));
+    productsRef.current = hydrated;
+    setProducts(hydrated);
+    setLoadedUserId(ownerUserId);
+
+    const cacheResult = cacheProducts(hydrated);
+    setStorageError(cacheResult.ok ? '' : cacheResult.message);
+    if (imageFailures) {
+      setSyncMessage(
+        `${imageFailures} 張私人縮圖暫時未能載入；商品資料仍然已由雲端同步。`,
+      );
+    }
+    return true;
+  };
+
+  const refreshCloudProducts = async (userId: string) => {
+    const rows = await fetchProductRows(userId);
+    await applyRows(rows, userId);
+  };
+
+  useEffect(() => {
+    let active = true;
+
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) setSyncMessage('暫時未能確認登入狀態，請重新整理再試。');
+      activeUserIdRef.current = data.session?.user.id ?? null;
+      setSession(data.session);
+      setAuthReady(true);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!active) return;
+      const nextUserId = nextSession?.user.id ?? null;
+      if (activeUserIdRef.current !== nextUserId) {
+        loadRunRef.current += 1;
+        clearObjectUrls();
+        productsRef.current = [];
+        setProducts([]);
+        setLoadedUserId(null);
+        setDataLoading(Boolean(nextUserId));
+      }
+      activeUserIdRef.current = nextUserId;
+      setSession(nextSession);
+      setAuthReady(true);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+      clearObjectUrls();
+    };
+  }, []);
+
+  useEffect(() => {
+    const user = session?.user;
+    const run = ++loadRunRef.current;
+
+    setSheetProduct(undefined);
+    setDeleteTarget(null);
+    setQuery('');
+    setCategory('全部');
+
+    if (!user) {
+      clearObjectUrls();
+      productsRef.current = [];
+      setProducts([]);
+      setLoadedUserId(null);
+      setDataLoading(false);
+      setMigrationProgress('');
+      return;
+    }
+
+    const load = async () => {
+      setDataLoading(true);
+      setStorageError('');
+      setSyncMessage('');
+      const cachedProducts = readLocalProducts();
+      const claim = readMigrationClaim();
+      const marker = readMigrationMarker(user.id);
+      const localBelongsToUser = !claim || claim.userId === user.id;
+      const backedUpProducts =
+        claim?.userId === user.id && marker?.status !== 'complete'
+          ? readMigrationSource(user.id)
+          : [];
+      const sourceProducts = backedUpProducts.length
+        ? backedUpProducts
+        : cachedProducts;
+
+      try {
+        if (
+          sourceProducts.length &&
+          localBelongsToUser &&
+          marker?.status !== 'complete'
+        ) {
+          const outcome = await migrateLocalProducts(
+            user,
+            sourceProducts,
+            setMigrationProgress,
+          );
+          if (outcome.message) setSyncMessage(outcome.message);
+        }
+
+        const rows = await fetchProductRows(user.id);
+        if (loadRunRef.current !== run) return;
+        await applyRows(rows, user.id, run);
+      } catch (loadError) {
+        if (loadRunRef.current !== run) return;
+
+        const latestMarker = readMigrationMarker(user.id);
+        if (
+          sourceProducts.length &&
+          localBelongsToUser &&
+          latestMarker?.status !== 'complete'
+        ) {
+          clearObjectUrls();
+          productsRef.current = sourceProducts;
+          setProducts(sourceProducts);
+          setLoadedUserId(user.id);
+        }
+        setSyncMessage(
+          errorMessage(
+            loadError,
+            '雲端同步未完成，舊本機資料仍然保留。請檢查網絡或 Supabase 權限後重試。',
+          ),
+        );
+      } finally {
+        if (loadRunRef.current === run) {
+          setMigrationProgress('');
+          setDataLoading(false);
+        }
+      }
+    };
+
+    void load();
+  }, [session?.user.id]);
 
   const filtered = useMemo(
     () =>
@@ -961,34 +1749,163 @@ export default function App() {
     (product) => getExpiryStatus(product) === 'expired',
   ).length;
 
-  const updateQuantity = (id: string, amount: number) =>
-    persistProducts(
-      productsRef.current.map((product) =>
-        product.id === id
-          ? { ...product, quantity: Math.max(0, product.quantity + amount) }
-          : product,
-      ),
-    );
+  const updateQuantity = async (id: string, amount: number) => {
+    const user = session?.user;
+    const product = productsRef.current.find((item) => item.id === id);
+    if (!user || !product || mutationBusy) return;
 
-  const saveProduct = (product: Product) => {
-    const exists = productsRef.current.some((item) => item.id === product.id);
-    return persistProducts(
-      exists
-        ? productsRef.current.map((item) =>
-            item.id === product.id ? product : item,
-          )
-        : [product, ...productsRef.current],
-    );
+    setMutationBusy(true);
+    setSyncMessage('');
+    try {
+      const quantity = Math.max(0, product.quantity + amount);
+      const { error } = await supabase
+        .from('products')
+        .update({ quantity })
+        .eq('user_id', user.id)
+        .eq('id', id);
+      if (error) throw error;
+      await refreshCloudProducts(user.id);
+    } catch (quantityError) {
+      setSyncMessage(
+        errorMessage(
+          quantityError,
+          '數量未能保存到雲端，畫面未有改動。請稍後再試。',
+        ),
+      );
+    } finally {
+      setMutationBusy(false);
+    }
   };
 
-  const deleteProduct = (id: string) => {
-    const result = persistProducts(
-      productsRef.current.filter((product) => product.id !== id),
-    );
-    if (result.ok) setDeleteTarget(null);
+  const saveProduct = async (product: Product): Promise<SaveResult> => {
+    const user = session?.user;
+    if (!user) {
+      return { ok: false, message: '登入狀態已失效，請重新登入後再保存。' };
+    }
+
+    setMutationBusy(true);
+    setSyncMessage('');
+    const existing = productsRef.current.find((item) => item.id === product.id);
+    const oldImagePath = existing?.imagePath ?? '';
+    let nextImagePath = product.imagePath ?? oldImagePath;
+    let uploadedPath = '';
+
+    try {
+      if (product.image?.startsWith('data:image/')) {
+        nextImagePath = await uploadProductImage(
+          user.id,
+          product.id,
+          product.image,
+        );
+        uploadedPath = nextImagePath;
+      } else if (!product.image && oldImagePath) {
+        nextImagePath = '';
+      }
+
+      const { error } = await supabase
+        .from('products')
+        .upsert(productToRow(product, user.id, nextImagePath), {
+          onConflict: 'user_id,id',
+        });
+      if (error) {
+        if (uploadedPath && uploadedPath !== oldImagePath) {
+          await supabase.storage
+            .from(PRODUCT_THUMBNAILS_BUCKET)
+            .remove([uploadedPath]);
+        }
+        throw error;
+      }
+
+      let cleanupWarning = '';
+      if (oldImagePath && oldImagePath !== nextImagePath) {
+        try {
+          await removeProductImage(oldImagePath);
+        } catch {
+          cleanupWarning =
+            '商品已保存，但舊縮圖未能清理；請稍後重新登入再檢查。';
+        }
+      }
+
+      await refreshCloudProducts(user.id);
+      if (cleanupWarning) setSyncMessage(cleanupWarning);
+      return { ok: true };
+    } catch (saveError) {
+      return {
+        ok: false,
+        message: errorMessage(
+          saveError,
+          '商品未能保存到雲端，表單內容已保留。請檢查網絡後再試。',
+        ),
+      };
+    } finally {
+      setMutationBusy(false);
+    }
+  };
+
+  const deleteProduct = async (product: Product) => {
+    const user = session?.user;
+    if (!user || mutationBusy) return;
+
+    setMutationBusy(true);
+    setSyncMessage('');
+    try {
+      const { error } = await supabase
+        .from('products')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('id', product.id);
+      if (error) throw error;
+
+      let cleanupWarning = '';
+      if (product.imagePath) {
+        try {
+          await removeProductImage(product.imagePath);
+        } catch {
+          cleanupWarning =
+            '商品已刪除，但私人縮圖未能清理；請檢查 Storage policy。';
+        }
+      }
+
+      await refreshCloudProducts(user.id);
+      setDeleteTarget(null);
+      if (cleanupWarning) setSyncMessage(cleanupWarning);
+    } catch (deleteError) {
+      setSyncMessage(
+        errorMessage(
+          deleteError,
+          '商品未能由雲端刪除，畫面未有改動。請稍後再試。',
+        ),
+      );
+    } finally {
+      setMutationBusy(false);
+    }
   };
 
   const openNewProduct = () => setSheetProduct(null);
+
+  const signOut = async () => {
+    if (mutationBusy) return;
+    setMutationBusy(true);
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      setSyncMessage('暫時未能登出，請檢查網絡後再試。');
+      setMutationBusy(false);
+    }
+  };
+
+  if (!authReady) {
+    return <FullScreenLoading message="正在確認登入狀態…" />;
+  }
+
+  if (!session) return <AuthScreen />;
+
+  if (dataLoading || loadedUserId !== session.user.id) {
+    return (
+      <FullScreenLoading
+        message={migrationProgress || '正在由私人雲端載入抽屜…'}
+      />
+    );
+  }
 
   return (
     <div className="organized-beauty-root drawer-noise min-h-[100dvh] bg-[hsl(var(--drawer-paper))]">
@@ -1006,14 +1923,29 @@ export default function App() {
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={openNewProduct}
-              className="flex h-11 items-center gap-2 rounded-xl bg-[hsl(var(--drawer-coral))] px-4 text-sm font-extrabold text-white"
-            >
-              <Plus size={18} />
-              新增
-            </button>
+            <div className="flex items-center gap-2">
+              <span className="hidden max-w-48 truncate text-xs font-bold text-[hsl(var(--drawer-muted))] sm:block">
+                {session.user.email}
+              </span>
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                disabled={mutationBusy}
+                aria-label="登出"
+                className="flex h-11 w-11 items-center justify-center rounded-xl bg-[hsl(var(--drawer-panel))] text-[hsl(var(--drawer-muted))] disabled:opacity-50"
+              >
+                <LogOut size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={openNewProduct}
+                disabled={mutationBusy}
+                className="flex h-11 items-center gap-2 rounded-xl bg-[hsl(var(--drawer-coral))] px-3.5 text-sm font-extrabold text-white disabled:opacity-60 sm:px-4"
+              >
+                <Plus size={18} />
+                新增
+              </button>
+            </div>
           </header>
           {storageError && (
             <p
@@ -1021,6 +1953,15 @@ export default function App() {
               className="organize-in mt-4 rounded-xl bg-[hsl(7_78%_59%/.12)] px-3 py-2.5 text-xs font-bold leading-5 text-[hsl(var(--drawer-coral-dark))]"
             >
               {storageError}
+            </p>
+          )}
+          {syncMessage && (
+            <p
+              role="status"
+              className="organize-in mt-4 flex items-start gap-2 rounded-xl bg-[hsl(var(--drawer-aqua)/.35)] px-3 py-2.5 text-xs font-bold leading-5 text-[hsl(var(--drawer-ink))]"
+            >
+              <Cloud size={15} className="mt-0.5 shrink-0" />
+              {syncMessage}
             </p>
           )}
 
@@ -1156,7 +2097,9 @@ export default function App() {
                 <ProductTile
                   key={product.id}
                   product={product}
-                  onChange={(amount) => updateQuantity(product.id, amount)}
+                  onChange={(amount) =>
+                    void updateQuantity(product.id, amount)
+                  }
                   onEdit={() => setSheetProduct(product)}
                   onDelete={() => setDeleteTarget(product)}
                 />
@@ -1189,7 +2132,7 @@ export default function App() {
           product={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => {
-            deleteProduct(deleteTarget.id);
+            void deleteProduct(deleteTarget);
           }}
         />
       )}
