@@ -59,6 +59,16 @@ export default defineConfig({
     },
     dedupe: ['react', 'react-dom'],
   },
+  optimizeDeps: {
+    force: true,
+    include: [
+      '@supabase/supabase-js',
+      'lucide-react',
+      'react',
+      'react-dom/client',
+      'react/jsx-dev-runtime',
+    ],
+  },
   root: path.resolve(import.meta.dirname),
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
