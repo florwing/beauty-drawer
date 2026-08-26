@@ -65,6 +65,7 @@ type ProductRow = {
   pao_months: number | null;
   opened_date: string | null;
 };
+type ProductEditableFields = Omit<ProductRow, 'id' | 'user_id'>;
 type MigrationMarker = {
   status: 'pending' | 'complete';
   productIds: string[];
@@ -287,14 +288,11 @@ function readMigrationSource(userId: string) {
   return readProductsAtKey(LOCAL_BACKUP_KEY);
 }
 
-function productToRow(
+function productToEditableFields(
   product: Product,
-  userId: string,
   imagePath: string,
-): ProductRow {
+): ProductEditableFields {
   return {
-    id: product.id,
-    user_id: userId,
     name: product.name,
     brand: product.brand?.trim() || null,
     quantity: Math.max(0, Math.floor(product.quantity)),
@@ -311,6 +309,18 @@ function productToRow(
         ? Math.floor(product.paoMonths)
         : null,
     opened_date: product.openedDate || null,
+  };
+}
+
+function productToRow(
+  product: Product,
+  userId: string,
+  imagePath: string,
+): ProductRow {
+  return {
+    id: product.id,
+    user_id: userId,
+    ...productToEditableFields(product, imagePath),
   };
 }
 
@@ -606,9 +616,7 @@ async function migrateLocalProducts(
     if (!confirmedRow) {
       const { data, error } = await supabase
         .from('products')
-        .upsert(productToRow(product, user.id, imagePath), {
-          onConflict: 'user_id,id',
-        })
+        .insert(productToRow(product, user.id, imagePath))
         .select(
           'id,user_id,name,brand,quantity,category,image_path,price,purchase_location,unopened_expiry_date,pao_months,opened_date',
         )
@@ -622,10 +630,10 @@ async function migrateLocalProducts(
         throw error;
       }
       confirmedRow = data as ProductRow;
-    } else if (!confirmedRow.image_path && imagePath) {
+    } else {
       const { data, error } = await supabase
         .from('products')
-        .update({ image_path: imagePath })
+        .update(productToEditableFields(product, imagePath))
         .eq('user_id', user.id)
         .eq('id', product.id)
         .select(
@@ -633,9 +641,11 @@ async function migrateLocalProducts(
         )
         .single();
       if (error) {
-        await supabase.storage
-          .from(PRODUCT_THUMBNAILS_BUCKET)
-          .remove([uploadedPath]);
+        if (uploadedPath) {
+          await supabase.storage
+            .from(PRODUCT_THUMBNAILS_BUCKET)
+            .remove([uploadedPath]);
+        }
         throw error;
       }
       confirmedRow = data as ProductRow;
@@ -1802,18 +1812,27 @@ export default function App() {
         nextImagePath = '';
       }
 
-      const { error } = await supabase
-        .from('products')
-        .upsert(productToRow(product, user.id, nextImagePath), {
-          onConflict: 'user_id,id',
-        });
-      if (error) {
+      let writeError: { message: string } | null = null;
+      if (existing) {
+        const result = await supabase
+          .from('products')
+          .update(productToEditableFields(product, nextImagePath))
+          .eq('user_id', user.id)
+          .eq('id', product.id);
+        writeError = result.error;
+      } else {
+        const result = await supabase
+          .from('products')
+          .insert(productToRow(product, user.id, nextImagePath));
+        writeError = result.error;
+      }
+      if (writeError) {
         if (uploadedPath && uploadedPath !== oldImagePath) {
           await supabase.storage
             .from(PRODUCT_THUMBNAILS_BUCKET)
             .remove([uploadedPath]);
         }
-        throw error;
+        throw writeError;
       }
 
       let cleanupWarning = '';
