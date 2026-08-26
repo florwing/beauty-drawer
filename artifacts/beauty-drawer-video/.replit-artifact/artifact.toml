@@ -1,5 +1,5 @@
 kind = "video"
-previewPath = "/"
+previewPath = "/beauty-drawer-video/"
 title = "Beauty Drawer — Product Introduction"
 description = "A 16:9 animated product introduction for the Beauty Drawer cosmetics inventory app."
 version = "1.0.0"
@@ -9,7 +9,7 @@ router = "path"
 
 [[services]]
 name = "web"
-paths = [ "/" ]
+paths = [ "/beauty-drawer-video/" ]
 localPort = 18378
 
 [services.development]
@@ -26,4 +26,4 @@ to = "/index.html"
 
 [services.env]
 PORT = "18378"
-BASE_PATH = "/"
+BASE_PATH = "/beauty-drawer-video/"

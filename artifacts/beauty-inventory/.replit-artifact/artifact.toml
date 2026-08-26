@@ -1,5 +1,5 @@
 kind = "web"
-previewPath = "/"
+previewPath = "/beauty-inventory/"
 title = "美妝庫存管理"
 description = "一個手機優先的繁體中文個人美妝與護膚品庫存管理 App，支援相片、數量追蹤、快速扣減、補貨與本機儲存。"
 version = "1.0.0"
@@ -8,7 +8,7 @@ router = "path"
 
 [[services]]
 name = "web"
-paths = [ "/" ]
+paths = [ "/beauty-inventory/" ]
 localPort = 18376
 
 [services.development]
@@ -25,4 +25,4 @@ to = "/index.html"
 
 [services.env]
 PORT = "18376"
-BASE_PATH = "/"
+BASE_PATH = "/beauty-inventory/"
